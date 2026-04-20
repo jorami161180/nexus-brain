@@ -3,9 +3,9 @@ builder = "nixpacks"
 buildCommand = "npm install --include=dev"
 
 [deploy]
-startCommand = "node --import tsx/esm server/index.js"
+startCommand = "mkdir -p /app/data && node --import tsx/esm server/index.js"
 healthcheckPath = "/api/ping"
-healthcheckTimeout = 30
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
