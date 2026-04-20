@@ -3,7 +3,7 @@
  * Consolidates all agent logic, streaming, vision, and graph visualization.
  */
 
-const API = 'http://localhost:3003';
+const API = window.location.hostname === 'localhost' ? 'http://localhost:3003' : '';
 
 // ── HELPERS ──
 const esc = (t) => t ? String(t).replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';

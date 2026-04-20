@@ -1164,7 +1164,7 @@
 
 <script>
 // ─── Auth manager ──────────────────────────────────────────────────────────
-const API_BASE = 'http://localhost:3003';
+const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3003' : '';
 let _authMode = 'login';
 
 window.authSwitchTab = (mode) => {
@@ -1358,7 +1358,7 @@ window.manageSubscription = async () => {
 const _originalFetch = window.fetch;
 window.fetch = (url, opts = {}) => {
   const token = localStorage.getItem('nexus_token');
-  if (token && typeof url === 'string' && url.includes('localhost:3003')) {
+  if (token && typeof url === 'string' && (url.startsWith('/api') || url.includes('localhost:3003'))) {
     opts.headers = { ...(opts.headers || {}), 'Authorization': `Bearer ${token}` };
   }
   return _originalFetch(url, opts);
