@@ -395,6 +395,10 @@ class NexusBrain {
                   class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[#9C27B0]/30 text-[#9C27B0] text-[0.6rem] font-bold uppercase tracking-widest hover:bg-[#9C27B0]/10 transition-all">
                   <span class="material-symbols-outlined text-sm">book_2</span>Obsidian
                 </button>
+                <button onclick="window.nexus.deleteProject(${p.id}, this)"
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-red-900/30 text-red-500 text-[0.6rem] font-bold uppercase tracking-widest hover:bg-red-900/20 transition-all">
+                  <span class="material-symbols-outlined text-sm">delete</span>Eliminar
+                </button>
               </div>
             </div>
           </div>
@@ -773,6 +777,16 @@ class NexusBrain {
       toast(`${key} guardada`);
       if (btn) { btn.textContent = '✓'; setTimeout(() => btn.textContent = 'Guardar', 1500); }
     } catch { toast('Error guardando', 'error'); }
+  }
+
+  async deleteProject(projectId, btn) {
+    if (!confirm('¿Eliminar este proyecto? Esta acción no se puede deshacer.')) return;
+    try {
+      const res = await fetch(`${API}/api/pipeline/${projectId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) { toast('Proyecto eliminado', 'success'); this.loadProjects(); }
+      else toast('Error al eliminar: ' + data.error, 'error');
+    } catch (e) { toast('Error al eliminar', 'error'); }
   }
 
   async sendToObsidian(projectId, btn) {

@@ -619,6 +619,16 @@ app.post('/api/test', async (req, res) => {
   }
 });
 
+// ─── Delete project ───────────────────────────────────────────────────
+app.delete('/api/pipeline/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    await pool.query('DELETE FROM project_phases WHERE project_id=$1', [id]);
+    await pool.query('DELETE FROM projects WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Deploy ───────────────────────────────────────────────────────────
 app.post('/api/deploy', async (req, res) => {
   try {
