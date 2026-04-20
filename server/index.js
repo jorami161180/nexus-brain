@@ -241,8 +241,10 @@ app.post('/api/chat', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
 
-  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  const send = (event, data) => { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); if (res.flush) res.flush(); };
 
   try {
     // Construir contexto de conversación a partir del historial (últimos 6 turnos)
@@ -539,7 +541,7 @@ app.post('/api/research', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, payload = {}) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+  const send = (type, payload = {}) => { res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`); if (res.flush) res.flush(); };
 
   try {
     const result = await research(req.body.query, req.body.depth, true, send);
@@ -1009,8 +1011,7 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, payload = {}) =>
-    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+  const send = (type, payload = {}) => { res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`); if (res.flush) res.flush(); };
 
   const projectId = Number(req.params.id);
   const phaseKey = req.params.phaseKey;
@@ -1236,7 +1237,7 @@ app.post('/api/pipeline/:id/phases/:phaseKey/approve', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, payload = {}) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+  const send = (type, payload = {}) => { res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`); if (res.flush) res.flush(); };
 
   const projectId = Number(req.params.id);
   const phaseKey = req.params.phaseKey;
@@ -1319,7 +1320,7 @@ app.post('/api/pipeline/:id/refine', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-  const send = (type, payload = {}) => res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+  const send = (type, payload = {}) => { res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`); if (res.flush) res.flush(); };
 
   const projectId = Number(req.params.id);
   try {
