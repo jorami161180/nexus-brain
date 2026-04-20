@@ -1801,32 +1801,33 @@ app.get('/api/pipeline/:id/export-zip', async (req, res) => {
 
 // ─── Stripe Billing ───────────────────────────────────────────────────────────
 
-const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
-const STRIPE_PRO_PRICE_ID = process.env.STRIPE_PRO_PRICE_ID;
-const APP_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-
 app.post('/api/billing/checkout', async (req, res) => {
-  if (!STRIPE_SECRET) return res.status(400).json({ error: 'Stripe no configurado. Añade STRIPE_SECRET_KEY al .env' });
+  const secret = process.env.STRIPE_SECRET_KEY;
+  const priceId = process.env.STRIPE_PRO_PRICE_ID;
+  const appUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  if (!secret) return res.status(400).json({ error: 'Stripe no configurado. Añade STRIPE_SECRET_KEY al .env' });
   const { default: Stripe } = await import('stripe');
-  const stripe = new Stripe(STRIPE_SECRET);
+  const stripe = new Stripe(secret);
   const user = getUserById(req.user.id);
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
-    line_items: [{ price: STRIPE_PRO_PRICE_ID, quantity: 1 }],
+    line_items: [{ price: priceId, quantity: 1 }],
     customer_email: user.email,
     metadata: { userId: String(req.user.id) },
-    success_url: `${APP_URL}?upgrade=success`,
-    cancel_url: `${APP_URL}?upgrade=cancelled`,
+    success_url: `${appUrl}?upgrade=success`,
+    cancel_url: `${appUrl}?upgrade=cancelled`,
   });
   res.json({ url: session.url });
 });
 
 app.post('/api/billing/portal', async (req, res) => {
-  if (!STRIPE_SECRET) return res.status(400).json({ error: 'Stripe no configurado' });
+  const secret = process.env.STRIPE_SECRET_KEY;
+  const appUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  if (!secret) return res.status(400).json({ error: 'Stripe no configurado' });
   const { default: Stripe } = await import('stripe');
-  const stripe = new Stripe(STRIPE_SECRET);
+  const stripe = new Stripe(secret);
 
   const user = getUserById(req.user.id);
   const customers = await stripe.customers.list({ email: user.email, limit: 1 });
@@ -1834,16 +1835,15 @@ app.post('/api/billing/portal', async (req, res) => {
 
   const session = await stripe.billingPortal.sessions.create({
     customer: customers.data[0].id,
-    return_url: APP_URL,
+    return_url: appUrl,
   });
   res.json({ url: session.url });
 });
 
-
 app.get('/api/billing/status', (req, res) => {
   const user = getUserById(req.user.id);
   const { used, limit } = checkRunLimit(user);
-  res.json({ plan: user.plan, runs_used: used, limit, stripe_configured: !!STRIPE_SECRET });
+  res.json({ plan: user.plan, runs_used: used, limit, stripe_configured: !!process.env.STRIPE_SECRET_KEY });
 });
 
 const server = app.listen(PORT, () => {
