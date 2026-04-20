@@ -96,13 +96,14 @@ app.get('/workspace/:slug/:file(*)', async (req, res) => {
     const projects = await getProjectsWithPhases(200);
     const toSlug = n => String(n).toLowerCase().replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').slice(0, 50);
     const project = projects.find(p => toSlug(p.name) === slug);
-    if (!project) return res.status(404).send('Proyecto no encontrado');
+    if (!project) return res.status(404).send(`Proyecto no encontrado. Slug: "${slug}". Proyectos: ${projects.map(p => toSlug(p.name)).join(', ')}`);
     const devPhase = project.phases?.find(ph => ph.phase_key === 'dev');
-    if (!devPhase?.output) return res.status(404).send('Fase dev no completada');
+    if (!devPhase?.output) return res.status(404).send('Fase dev no completada o sin output');
     const devData = JSON.parse(devPhase.output);
+    if (!devData.files?.length) return res.status(404).send(`Dev output no tiene archivos. Keys: ${Object.keys(devData).join(', ')}`);
     const targetFile = file || 'index.html';
     const fileObj = devData.files?.find(f => f.path === targetFile || f.path === `./${targetFile}`);
-    if (!fileObj) return res.status(404).send(`Archivo ${targetFile} no encontrado`);
+    if (!fileObj) return res.status(404).send(`Archivo "${targetFile}" no encontrado. Archivos disponibles: ${devData.files.map(f => f.path).join(', ')}`);
     const ext = path.extname(targetFile).toLowerCase();
     const mimes = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
     res.setHeader('Content-Type', mimes[ext] || 'text/plain');
