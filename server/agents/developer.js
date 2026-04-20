@@ -322,8 +322,15 @@ export async function developer({ spec, task, projectId = null, projectName = ''
     const prompt = buildPrompt(task, spec, !!image);
     const { text, provider, model } = await smartChat('developer', CONTENT_SYSTEM, prompt, 3000, image);
 
-    const content = parseContent(text);
-    if (!content) throw new Error('El modelo no devolvió JSON de contenido válido');
+    let content = parseContent(text);
+    if (!content) {
+      // Retry with simpler prompt
+      console.warn('[Developer] Primer intento falló, reintentando con prompt simplificado...');
+      const simplePrompt = `Genera contenido JSON para una landing page de: ${task}. Devuelve SOLO JSON válido con esta estructura exacta: {"template":"dark","name":"${task}","emoji":"🚀","badge_text":"Nuevo","hero_headline_1":"Transforma tu negocio","hero_headline_2":"La solución que necesitabas","hero_description":"Descripción del producto.","cta_primary":"Empezar gratis","cta_secondary":"Ver demo","color_primary":"#7c3aed","color_accent":"#a78bfa","features_subtitle":"Todo lo que necesitas","features":[{"icon":"⚡","title":"Rápido","desc":"Velocidad máxima"},{"icon":"🔒","title":"Seguro","desc":"Datos protegidos"},{"icon":"📊","title":"Analytics","desc":"Métricas en tiempo real"},{"icon":"🤖","title":"IA integrada","desc":"Automatización inteligente"},{"icon":"🌐","title":"Global","desc":"Disponible en todo el mundo"}],"stats":[{"num":"10K+","label":"usuarios"},{"num":"99%","label":"uptime"},{"num":"2x","label":"más rápido"}],"kanban_cols":[{"title":"Por hacer","color":"#ef4444","cards":["Tarea 1"]},{"title":"En progreso","color":"#f59e0b","cards":["Tarea 2"]},{"title":"Hecho","color":"#10b981","cards":["Tarea 3"]}],"pricing":[{"name":"Gratis","price":"€0","period":"/mes","features":["5 proyectos","Soporte básico"],"cta":"Empezar","popular":false},{"name":"Pro","price":"€19","period":"/mes","features":["Proyectos ilimitados","Soporte prioritario","IA avanzada"],"cta":"Elegir Pro","popular":true}],"cta_section_title":"Empieza hoy","cta_section_sub":"Sin tarjeta de crédito","footer_desc":"La mejor solución para tu negocio","logos":["Google","Microsoft","Stripe"],"testimonials":[{"text":"Increíble producto, lo recomiendo totalmente.","name":"María García","role":"CEO · TechCorp","initial":"MG"}]}`;
+      const retry = await smartChat('developer', 'Devuelve SOLO JSON válido, sin texto adicional ni markdown.', simplePrompt, 3000);
+      content = parseContent(retry.text);
+      if (!content) throw new Error('El modelo no devolvió JSON de contenido válido');
+    }
 
     const templateKey = TEMPLATES[content.template] ? content.template : 'dark';
     const htmlCode = renderTemplate(content);
