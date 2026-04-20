@@ -1,0 +1,13 @@
+node_modules/
+.env
+nexus.db
+nexus.db-shm
+nexus.db-wal
+tu_base_de_datos.db
+dist/
+.DS_Store
+workspace/
+scratch/
+brain_trace.txt
+stitch-export/
+construyeia-docs/
