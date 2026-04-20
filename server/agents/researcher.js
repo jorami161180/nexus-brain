@@ -310,12 +310,12 @@ export async function research(searchQuery, depth = 'basic', sync = true, send =
   const sources = results.map(r => ({ title: r.title, url: r.url, source: r.source || 'tavily' }));
 
   // 6. Guardar en caché
-  saveResearchCache.run({ query_hash: queryHash, query: searchQuery, depth, result: JSON.stringify(parsedData), sources: JSON.stringify(sources) });
+  await saveResearchCache({ query_hash: queryHash, query: searchQuery, depth, result: JSON.stringify(parsedData), sources: JSON.stringify(sources) });
 
   // 7. Guardar en DB local de captures si es relevante
   if (parsedData.capture_worthy) {
     try {
-      saveCapture.run({
+      await saveCapture({
         title:   `Investigación: ${searchQuery}`,
         summary: parsedData.summary,
         type:    'research',

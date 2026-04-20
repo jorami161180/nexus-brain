@@ -85,7 +85,7 @@ Responde ÚNICAMENTE con el JSON.`,
       github_url: null
     };
 
-    if (!skipSave) saveProject.run(record);
+    if (!skipSave) await saveProject(record);
 
     return { success: true, data };
   } catch (err) {

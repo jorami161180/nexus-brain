@@ -340,7 +340,7 @@ export async function developer({ spec, task, projectId = null, projectName = ''
     const workspacePath = await writeFilesToDisk(projectId, projectName, files);
     if (workspacePath) data.workspace_path = workspacePath;
 
-    saveDevSession.run({ project_id: projectId, task, files: JSON.stringify(files), notes: data.notes });
+    await saveDevSession({ project_id: projectId, task, files: JSON.stringify(files), notes: data.notes });
     console.log(`[Developer] Landing generada vía ${provider} — template: '${templateKey}' — ${htmlCode.length} chars`);
     return { success: true, data };
 

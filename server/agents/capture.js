@@ -61,7 +61,7 @@ export async function capture({ type, content, url, imageBase64, embedding }) {
   return parseResult(text, embedding);
 }
 
-function parseResult(text, embedding = null) {
+async function parseResult(text, embedding = null) {
   try {
     const json = text.match(/\{[\s\S]*\}/)?.[0];
     if (!json) throw new Error('No JSON found in response');
@@ -71,7 +71,7 @@ function parseResult(text, embedding = null) {
     const contentText = (data.key_points || []).map(p => `- ${p}`).join('\n');
     const tagsText = (data.suggested_tags || []).join(', ');
 
-    saveCapture.run({
+    await saveCapture({
       title: data.title || 'Sin título',
       summary: data.summary || '',
       type: data.type || 'note',

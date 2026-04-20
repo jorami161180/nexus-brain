@@ -97,7 +97,7 @@ ${(parsed.tasks || []).map(t => `- [ ] ${t}`).join('\n')}
 
     // 3. Guardado en DB Local
     try {
-      saveProject.run({
+      await saveProject({
         name: parsed.repo_name || projectData.name,
         summary: parsed.description || projectData.content,
         stack: parsed.stack || projectData.stack,

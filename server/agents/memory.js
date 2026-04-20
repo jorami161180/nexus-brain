@@ -59,7 +59,7 @@ export async function query(question, additionalContext = []) {
 
     // Guardar la consulta en el historial de memoria
     try {
-      saveMemoryQuery.run({
+      await saveMemoryQuery({
         question,
         answer: data.answer || text,
         confidence: data.confidence || 0.5,

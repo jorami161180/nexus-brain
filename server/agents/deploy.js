@@ -100,7 +100,7 @@ export async function deploy({ projectName, files }) {
     const deployUrl = `https://${finalData.url || data.url}`;
     const projectUrl = `https://${slug}.vercel.app`;
 
-    saveDeploy.run({
+    await saveDeploy({
       project_name: slug,
       deploy_url:   deployUrl,
       project_url:  projectUrl,
