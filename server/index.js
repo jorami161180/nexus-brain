@@ -262,6 +262,15 @@ app.post('/api/chat', async (req, res) => {
       }
     } catch (e) { console.error('[RAG] Error en búsqueda rápida:', e.message); }
 
+    // 1. Pre-filtro rápido: conversación casual va directo a chat sin orquestador
+    const CHAT_PATTERN = /^(hola|hey|buenas|hi|hello|qué tal|como estás|cómo estás|buenos días|buenas tardes|buenas noches|gracias|ok|vale|bien|perfecto|genial|sí|no|claro|ayuda|help|who are you|quién eres|qué eres|qué puedes hacer|qué haces)[^a-z]*$/i;
+    const isShortChat = input.trim().length < 80 && CHAT_PATTERN.test(input.trim());
+
+    let agent, reasoning, confidence;
+    if (isShortChat) {
+      agent = 'chat'; reasoning = 'conversación casual'; confidence = 1.0;
+      send('agent_activity', { agent, reasoning, confidence });
+    } else {
     // 1. Orquestar la petición
     console.log(`[Chat] Iniciando orquestación para: "${input}"`);
     let orchResult = await orchestrate(input, { ...context, conversationHistory: historyContext, memoryContext });
@@ -272,12 +281,13 @@ app.post('/api/chat', async (req, res) => {
 
     // 1.1 Refinar decisión con el motor optimizado
     const refined = NexusOrchestrator.refine(input, orchResult.orchestration);
-    const { agent, reasoning, confidence } = refined;
+    ({ agent, reasoning, confidence } = refined);
 
     // 1.2 Persistir rastro (Auditoría)
     NexusOrchestrator.persist(input, orchResult.orchestration, refined);
 
     console.log(`[Orquestador] Destino: ${agent} (Razonamiento: ${reasoning})`);
+    } // end else (orchestrator path)
 
     // Informar al frontend del agente elegido
     send('agent_activity', { agent, reasoning, confidence });
