@@ -46,13 +46,13 @@ export const AGENT_MODELS = {
     claude: 'claude-haiku-4-5'
   },
   memory: {
-    groq: 'llama-3.3-70b-versatile',        // RAG: mejor comprensión semántica
+    groq: 'llama-3.1-8b-instant',            // RAG: rápido
     lmstudio: process.env.LM_MODEL_MEMORY || 'deepseek/deepseek-r1-0528-qwen3-8b', // Uso de razonamiento para RAG
     ollama: process.env.OLLAMA_MODEL_MEMORY || 'llama3.2',
     claude: 'claude-sonnet-4-5'               // ✅ nombre correcto Anthropic
   },
   writer: {
-    groq: 'llama-3.3-70b-versatile',        // escritura: calidad narrativa
+    groq: 'llama-3.1-8b-instant',            // escritura: rápido
     lmstudio: process.env.LM_MODEL_WRITER || 'qwen/qwen3.5-9b',
     ollama: process.env.OLLAMA_MODEL_WRITER || 'llama3.2',
     claude: 'claude-sonnet-4-5'               // ✅ nombre correcto Anthropic
@@ -70,7 +70,7 @@ export const AGENT_MODELS = {
     claude: 'claude-haiku-4-5'
   },
   developer: {
-    groq: 'llama-3.3-70b-versatile',        // código: JSON limpio + prompt detallado para diseño profesional
+    groq: 'llama-3.1-8b-instant',            // código: rápido
     lmstudio: process.env.LM_MODEL_DEVELOPER || 'qwen/qwen2.5-coder-14b',
     ollama: process.env.OLLAMA_MODEL_DEVELOPER || 'qwen2.5-coder:latest',
     claude: 'claude-sonnet-4-5'
