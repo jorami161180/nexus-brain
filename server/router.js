@@ -22,7 +22,7 @@ const ollamaBase = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
 //       deepseek-r1-distill-llama-70b (razonamiento profundo) para código y arquitectura
 export const AGENT_MODELS = {
   orchestrator: {
-    groq: 'llama-3.1-8b-instant',           // routing rápido, no necesita 70B
+    groq: 'llama-3.3-70b-versatile',         // routing: necesita seguir instrucciones exactas
     lmstudio: process.env.LM_MODEL_ORCHESTRATOR || 'google/gemma-3-4b', // Equilibrado para lógica de rutas
     ollama: process.env.OLLAMA_MODEL_ORCHESTRATOR || 'llama3.2',
     claude: 'claude-haiku-4-5'                // ✅ nombre correcto Anthropic
