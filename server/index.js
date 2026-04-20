@@ -89,7 +89,26 @@ if (isProd) {
   app.use(express.static(ROOT, { index: false }));
 }
 app.use('/public', express.static(path.join(ROOT, 'public')));
-app.use('/workspace', express.static(path.join(ROOT, 'workspace')));
+// Serve workspace files from DB (filesystem is ephemeral on Railway)
+app.get('/workspace/:slug/:file(*)', async (req, res) => {
+  try {
+    const { slug, file } = req.params;
+    const projects = await getProjectsWithPhases(200);
+    const toSlug = n => String(n).toLowerCase().replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').slice(0, 50);
+    const project = projects.find(p => toSlug(p.name) === slug);
+    if (!project) return res.status(404).send('Proyecto no encontrado');
+    const devPhase = project.phases?.find(ph => ph.phase_key === 'dev');
+    if (!devPhase?.output) return res.status(404).send('Fase dev no completada');
+    const devData = JSON.parse(devPhase.output);
+    const targetFile = file || 'index.html';
+    const fileObj = devData.files?.find(f => f.path === targetFile || f.path === `./${targetFile}`);
+    if (!fileObj) return res.status(404).send(`Archivo ${targetFile} no encontrado`);
+    const ext = path.extname(targetFile).toLowerCase();
+    const mimes = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
+    res.setHeader('Content-Type', mimes[ext] || 'text/plain');
+    res.send(fileObj.code);
+  } catch (err) { res.status(500).send(err.message); }
+});
 app.get('/', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
 app.get('/app', (_, res) => res.sendFile(isProd ? path.join(DIST, 'index.html') : path.join(ROOT, 'index.html')));
 app.get('/landing', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
