@@ -146,7 +146,15 @@ const CODE_AGENTS = new Set(['developer', 'architect', 'writer']);
 
 export async function smartChat(agent, system, userMessage, maxTokens = 1024, image = null) {
   const models = AGENT_MODELS[agent] || AGENT_MODELS.orchestrator;
-  const order = AGENT_PROVIDER_ORDER[agent] || PROVIDER_ORDER;
+  const rawOrder = AGENT_PROVIDER_ORDER[agent] || PROVIDER_ORDER;
+  // Skip local providers if their base URLs are not explicitly set
+  const hasLmStudio = !!process.env.LM_STUDIO_BASE_URL;
+  const hasOllama = !!process.env.OLLAMA_BASE_URL;
+  const order = rawOrder.filter(p => {
+    if (p === 'lmstudio' && !hasLmStudio) return false;
+    if (p === 'ollama' && !hasOllama) return false;
+    return true;
+  });
   const failures = [];
 
   for (const provider of order) {
