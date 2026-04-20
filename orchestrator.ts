@@ -202,7 +202,7 @@ export class NexusOrchestrator {
      * Persiste la decisión en el archivo de rastro para auditoría real-time.
      */
     public static persist(input: string, original: OrchestratorDecision, final: OrchestratorDecision): void {
-        const logPath = 'c:/Users/joram/Nexus-control/brain_trace.txt';
+        const logPath = path.join(process.cwd(), 'brain_trace.txt');
         const timestamp = new Date().toISOString();
 
         const entry = `
