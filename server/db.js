@@ -1,196 +1,168 @@
-import Database from 'better-sqlite3';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
+const { Pool } = pg;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.DB_PATH || join(__dirname, '..', 'nexus.db');
-const db = new Database(dbPath);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-// Optimizaciones
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const query = (text, params) => pool.query(text, params);
 
-// ─── Tablas ───────────────────────────────────────────────────────────────────
+// ─── Init tables ─────────────────────────────────────────────────────────────
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS captures (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    title     TEXT,
-    summary   TEXT,
-    type      TEXT,
-    tags      TEXT,
-    content   TEXT,
-    embedding TEXT,
-    raw       TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+export async function initDb() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS captures (
+      id SERIAL PRIMARY KEY,
+      title TEXT,
+      summary TEXT,
+      type TEXT,
+      tags TEXT,
+      content TEXT,
+      embedding TEXT,
+      raw TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS memory_queries (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    question   TEXT,
-    answer     TEXT,
-    confidence REAL,
-    sources    TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+    CREATE TABLE IF NOT EXISTS memory_queries (
+      id SERIAL PRIMARY KEY,
+      question TEXT,
+      answer TEXT,
+      confidence REAL,
+      sources TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS projects (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT,
-    summary    TEXT,
-    stack      TEXT,
-    features   TEXT,
-    phases     TEXT,
-    spec       TEXT,
-    status     TEXT DEFAULT 'planning',
-    github_url TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+    CREATE TABLE IF NOT EXISTS projects (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      summary TEXT,
+      stack TEXT,
+      features TEXT,
+      phases TEXT,
+      spec TEXT,
+      status TEXT DEFAULT 'planning',
+      github_url TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-// Asegurar columnas críticas antes de preparar statements
-const columns = db.prepare("PRAGMA table_info(captures)").all();
-if (!columns.find(c => c.name === 'embedding')) {
-  db.exec('ALTER TABLE captures ADD COLUMN embedding TEXT;');
-  console.log('✅ Columna "embedding" añadida a captures.');
-}
+    CREATE TABLE IF NOT EXISTS research_cache (
+      id SERIAL PRIMARY KEY,
+      query_hash TEXT UNIQUE,
+      query TEXT,
+      depth TEXT DEFAULT 'basic',
+      result TEXT,
+      sources TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-const projectCols = db.prepare("PRAGMA table_info(projects)").all();
-if (!projectCols.find(c => c.name === 'github_url')) {
-  db.exec('ALTER TABLE projects ADD COLUMN github_url TEXT;');
-  console.log('✅ Columna "github_url" añadida a projects.');
-}
+    CREATE TABLE IF NOT EXISTS dev_sessions (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER REFERENCES projects(id),
+      task TEXT,
+      files TEXT,
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS research_cache (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    query_hash TEXT UNIQUE,
-    query      TEXT,
-    depth      TEXT DEFAULT 'basic',
-    result     TEXT,
-    sources    TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+    CREATE TABLE IF NOT EXISTS deploys (
+      id SERIAL PRIMARY KEY,
+      project_name TEXT,
+      deploy_url TEXT,
+      project_url TEXT,
+      status TEXT,
+      files_count INTEGER,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS dev_sessions (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER REFERENCES projects(id),
-    task       TEXT,
-    files      TEXT,
-    notes      TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+    CREATE TABLE IF NOT EXISTS project_phases (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+      phase_num INTEGER NOT NULL,
+      phase_key TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      output TEXT,
+      notes TEXT,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS deploys (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_name  TEXT,
-    deploy_url    TEXT,
-    project_url   TEXT,
-    status        TEXT,
-    files_count   INTEGER,
-    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      name TEXT,
+      plan TEXT DEFAULT 'free',
+      runs_used INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
 
-  CREATE TABLE IF NOT EXISTS project_phases (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-    phase_num  INTEGER NOT NULL,
-    phase_key  TEXT NOT NULL,
-    status     TEXT DEFAULT 'pending',
-    output     TEXT,
-    notes      TEXT,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  -- Tabla virtual FTS5 para búsqueda semántica/full-text
-  CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(
-    title, summary, tags, content, raw,
-    content='captures', content_rowid='id'
-  );
-
-  -- Triggers para auto-sincronizar FTS5 cuando cambie captures
-  CREATE TRIGGER IF NOT EXISTS captures_ai AFTER INSERT ON captures BEGIN
-    INSERT INTO captures_fts(rowid, title, summary, tags, content, raw)
-    VALUES (new.id, new.title, new.summary, new.tags, new.content, new.raw);
-  END;
-  CREATE TRIGGER IF NOT EXISTS captures_ad AFTER DELETE ON captures BEGIN
-    INSERT INTO captures_fts(captures_fts, rowid, title, summary, tags, content, raw)
-    VALUES ('delete', old.id, old.title, old.summary, old.tags, old.content, old.raw);
-  END;
-  CREATE TRIGGER IF NOT EXISTS captures_au AFTER UPDATE ON captures BEGIN
-    INSERT INTO captures_fts(captures_fts, rowid, title, summary, tags, content, raw)
-    VALUES ('delete', old.id, old.title, old.summary, old.tags, old.content, old.raw);
-    INSERT INTO captures_fts(rowid, title, summary, tags, content, raw)
-    VALUES (new.id, new.title, new.summary, new.tags, new.content, new.raw);
-  END;
-`);
-
-// Popular FTS con datos preexistentes si no están indexados
-try {
-  db.exec('INSERT INTO captures_fts(rowid, title, summary, tags, content, raw) SELECT id, title, summary, tags, content, raw FROM captures WHERE id NOT IN (SELECT rowid FROM captures_fts);');
-} catch (e) {
-  // Ignorar errores de consistencia en el primer run
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      used INTEGER DEFAULT 0
+    );
+  `);
 }
 
 // ─── Users / Auth ─────────────────────────────────────────────────────────────
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    email        TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    name         TEXT,
-    plan         TEXT DEFAULT 'free',
-    runs_used    INTEGER DEFAULT 0,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+export async function createUser({ email, password_hash, name }) {
+  const r = await query(
+    'INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING *',
+    [email, password_hash, name]
   );
-`);
+  return r.rows[0];
+}
 
-export const createUser = db.prepare(`
-  INSERT INTO users (email, password_hash, name) VALUES (@email, @password_hash, @name)
-`);
+export async function getUserByEmail(email) {
+  const r = await query('SELECT * FROM users WHERE email = $1', [email]);
+  return r.rows[0] || null;
+}
 
-export const getUserByEmail = (email) =>
-  db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-
-export const getUserById = (id) =>
-  db.prepare('SELECT id, email, name, plan, runs_used, created_at FROM users WHERE id = ?').get(id);
-
-export const incrementUserRuns = db.prepare(`
-  UPDATE users SET runs_used = runs_used + 1 WHERE id = @id
-`);
-
-export const updateUserPlan = db.prepare(`
-  UPDATE users SET plan = @plan WHERE id = @id
-`);
-
-export const resetMonthlyRuns = db.prepare(`
-  UPDATE users SET runs_used = 0 WHERE id = @id
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS password_resets (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id   INTEGER NOT NULL,
-    token     TEXT UNIQUE NOT NULL,
-    expires_at DATETIME NOT NULL,
-    used      INTEGER DEFAULT 0
+export async function getUserById(id) {
+  const r = await query(
+    'SELECT id, email, name, plan, runs_used, created_at FROM users WHERE id = $1',
+    [id]
   );
-`);
+  return r.rows[0] || null;
+}
 
-export const createResetToken = db.prepare(`
-  INSERT INTO password_resets (user_id, token, expires_at)
-  VALUES (@user_id, @token, datetime('now', '+1 hour'))
-`);
+export async function incrementUserRuns(id) {
+  await query('UPDATE users SET runs_used = runs_used + 1 WHERE id = $1', [id]);
+}
 
-export const getResetToken = (token) =>
-  db.prepare(`SELECT * FROM password_resets WHERE token=? AND used=0 AND expires_at > datetime('now')`).get(token);
+export async function updateUserPlan(id, plan) {
+  await query('UPDATE users SET plan = $1 WHERE id = $2', [plan, id]);
+}
 
-export const markTokenUsed = db.prepare(`UPDATE password_resets SET used=1 WHERE token=@token`);
+export async function resetMonthlyRuns(id) {
+  await query('UPDATE users SET runs_used = 0 WHERE id = $1', [id]);
+}
 
-export const updateUserPassword = db.prepare(`UPDATE users SET password_hash=@hash WHERE id=@id`);
+export async function createResetToken({ user_id, token }) {
+  await query(
+    "INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
+    [user_id, token]
+  );
+}
+
+export async function getResetToken(token) {
+  const r = await query(
+    "SELECT * FROM password_resets WHERE token=$1 AND used=0 AND expires_at > NOW()",
+    [token]
+  );
+  return r.rows[0] || null;
+}
+
+export async function markTokenUsed(token) {
+  await query('UPDATE password_resets SET used=1 WHERE token=$1', [token]);
+}
+
+export async function updateUserPassword(id, hash) {
+  await query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, id]);
+}
 
 export const PLAN_LIMITS = { free: 15, pro: Infinity };
 
@@ -199,182 +171,206 @@ export function checkRunLimit(user) {
   return { allowed: user.runs_used < limit, used: user.runs_used, limit };
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+export async function countUsers() {
+  const r = await query('SELECT COUNT(*) as n FROM users');
+  return parseInt(r.rows[0].n);
+}
 
-export const saveCapture = db.prepare(`
-  INSERT INTO captures (title, summary, type, tags, content, embedding, raw)
-  VALUES (@title, @summary, @type, @tags, @content, @embedding, @raw)
-`);
+// ─── Captures ────────────────────────────────────────────────────────────────
 
-export const updateCaptureEmbedding = db.prepare(`
-  UPDATE captures SET embedding = @embedding
-  WHERE id = @id
-`);
+export async function saveCapture({ title, summary, type, tags, content, embedding, raw }) {
+  const r = await query(
+    'INSERT INTO captures (title, summary, type, tags, content, embedding, raw) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+    [title, summary, type, tags, content, embedding, raw]
+  );
+  return r.rows[0];
+}
 
-export const saveMemoryQuery = db.prepare(`
-  INSERT INTO memory_queries (question, answer, confidence, sources)
-  VALUES (@question, @answer, @confidence, @sources)
-`);
+export async function updateCaptureEmbedding(id, embedding) {
+  await query('UPDATE captures SET embedding=$1 WHERE id=$2', [embedding, id]);
+}
 
-export const saveProject = db.prepare(`
-  INSERT INTO projects (name, summary, stack, features, phases, spec, github_url)
-  VALUES (@name, @summary, @stack, @features, @phases, @spec, @github_url)
-`);
+export async function getCaptures(limit = 50) {
+  const r = await query('SELECT * FROM captures ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
 
-export const saveDevSession = db.prepare(`
-  INSERT INTO dev_sessions (project_id, task, files, notes)
-  VALUES (@project_id, @task, @files, @notes)
-`);
+export async function searchCaptures(q) {
+  const r = await query(
+    "SELECT * FROM captures WHERE title ILIKE $1 OR summary ILIKE $1 OR tags ILIKE $1 ORDER BY created_at DESC LIMIT 30",
+    [`%${q}%`]
+  );
+  return r.rows;
+}
 
-export const saveDeploy = db.prepare(`
-  INSERT INTO deploys (project_name, deploy_url, project_url, status, files_count)
-  VALUES (@project_name, @deploy_url, @project_url, @status, @files_count)
-`);
-export const updateProjectFeatures = db.prepare(`
-  UPDATE projects SET features = @features WHERE id = @id
-`);
+export async function searchMemoryFTS(q) {
+  return searchCaptures(q);
+}
 
-export const insertPhase = db.prepare(`
-  INSERT INTO project_phases (project_id, phase_num, phase_key, status)
-  VALUES (@project_id, @phase_num, @phase_key, 'pending')
-`);
-
-export const updatePhase = db.prepare(`
-  UPDATE project_phases SET status=@status, output=@output, notes=@notes, updated_at=CURRENT_TIMESTAMP
-  WHERE project_id=@project_id AND phase_key=@phase_key
-`);
-
-export const updateProjectStatus = db.prepare(`
-  UPDATE projects SET status=@status WHERE id=@id
-`);
-
-export const getPhases = (projectId) =>
-  db.prepare('SELECT * FROM project_phases WHERE project_id=? ORDER BY phase_num').all(projectId);
-
-export const getPhase = (projectId, phaseKey) =>
-  db.prepare('SELECT * FROM project_phases WHERE project_id=? AND phase_key=?').get(projectId, phaseKey);
-
-// Solo proyectos con fases del nuevo pipeline (idea/spec/dev/test/deploy/live)
-export const getProjectsWithPhases = (limit = 50) => {
-  const projects = db.prepare(`
-    SELECT DISTINCT p.* FROM projects p
-    LEFT JOIN project_phases ph ON ph.project_id = p.id
-    ORDER BY p.created_at DESC LIMIT ?
-  `).all(limit);
-  return projects.map(p => ({
-    ...p,
-    phases: db.prepare('SELECT * FROM project_phases WHERE project_id=? ORDER BY phase_num').all(p.id)
-  }));
-};
-
-// ─── Queries ──────────────────────────────────────────────────────────────────
-
-export const getCaptures = (limit = 50) =>
-  db.prepare('SELECT * FROM captures ORDER BY created_at DESC LIMIT ?').all(limit);
-
-export const getProjects = (limit = 10) => {
-  return db.prepare('SELECT * FROM projects ORDER BY created_at DESC LIMIT ?').all(limit);
-};
-
-export const getProjectById = (id) => {
-  return db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
-};
-
-export const getProjectTasks = (projectId) => {
-  // En una versión futura podríamos tener una tabla de tareas dedicada. 
-  // Por ahora devolvemos el campo features parseado.
-  const project = getProjectById(projectId);
-  return project ? JSON.parse(project.features || '[]') : [];
-};
-
-export const getDeploys = (limit = 20) =>
-  db.prepare('SELECT * FROM deploys ORDER BY created_at DESC LIMIT ?').all(limit);
-
-export const getMemoryQueries = (limit = 20) =>
-  db.prepare('SELECT * FROM memory_queries ORDER BY created_at DESC LIMIT ?').all(limit);
-
-export const getDevSessions = (limit = 20) =>
-  db.prepare('SELECT * FROM dev_sessions ORDER BY created_at DESC LIMIT ?').all(limit);
-
-// ─── Research cache ───────────────────────────────────────────────────────────
-export const saveResearchCache = db.prepare(`
-  INSERT OR REPLACE INTO research_cache (query_hash, query, depth, result, sources)
-  VALUES (@query_hash, @query, @depth, @result, @sources)
-`);
-
-export const getResearchCache = (queryHash, maxAgeHours = 24) => {
-  return db.prepare(`
-    SELECT * FROM research_cache
-    WHERE query_hash = ?
-    AND created_at > datetime('now', '-${maxAgeHours} hours')
-    ORDER BY created_at DESC LIMIT 1
-  `).get(queryHash);
-};
-
-export const getRecentResearches = (limit = 10) =>
-  db.prepare('SELECT id, query, depth, created_at FROM research_cache ORDER BY created_at DESC LIMIT ?').all(limit);
-
-export const searchCaptures = (q) => {
-  // Intentar FTS5 primero, fallback a LIKE si falla
-  try {
-    const keywords = q.replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]/g, ' ')
-      .trim().split(/\s+/).filter(w => w.length > 2).map(w => w + '*').join(' OR ');
-    if (keywords) {
-      return db.prepare(`SELECT c.* FROM captures_fts f JOIN captures c ON f.rowid = c.id WHERE captures_fts MATCH ? ORDER BY rank LIMIT 30`).all(keywords);
-    }
-  } catch { /* fallback */ }
-  return db.prepare("SELECT * FROM captures WHERE title LIKE ? OR summary LIKE ? OR tags LIKE ? ORDER BY created_at DESC LIMIT 30")
-    .all(`%${q}%`, `%${q}%`, `%${q}%`);
-};
-
-/**
- * Búsqueda semántica usando Similitud de Coseno en JS
- */
-export const searchSemantic = (queryVector, limit = 5) => {
-  const allCaptures = db.prepare('SELECT id, title, summary, content, type, embedding FROM captures WHERE embedding IS NOT NULL').all();
-
+export async function searchSemantic(queryVector, limit = 5) {
+  const r = await query('SELECT id, title, summary, content, type, embedding FROM captures WHERE embedding IS NOT NULL');
+  const allCaptures = r.rows;
   const scored = allCaptures.map(cap => {
     const capVector = JSON.parse(cap.embedding);
-    // Similitud de coseno básica
-    let dotProduct = 0;
-    let magA = 0;
-    let magB = 0;
+    let dot = 0, magA = 0, magB = 0;
     for (let i = 0; i < queryVector.length; i++) {
-      dotProduct += queryVector[i] * capVector[i];
-      magA += queryVector[i] * queryVector[i];
-      magB += capVector[i] * capVector[i];
+      dot += queryVector[i] * capVector[i];
+      magA += queryVector[i] ** 2;
+      magB += capVector[i] ** 2;
     }
-    const similarity = dotProduct / (Math.sqrt(magA) * Math.sqrt(magB));
-    return { ...cap, similarity };
+    return { ...cap, similarity: dot / (Math.sqrt(magA) * Math.sqrt(magB)) };
   });
-
   return scored.sort((a, b) => b.similarity - a.similarity).slice(0, limit);
-};
+}
 
-export const searchMemoryFTS = (query, limit = 15) => {
-  // Extraer palabras clave de más de 2 letras y formatear para FTS5 MATCH
-  const keywords = query.replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]/g, ' ')
-    .trim().split(/\s+/)
-    .filter(w => w.length > 2)
-    .map(w => w + '*')
-    .join(' OR ');
+// ─── Memory queries ───────────────────────────────────────────────────────────
 
-  if (!keywords) return [];
+export async function saveMemoryQuery({ question, answer, confidence, sources }) {
+  await query(
+    'INSERT INTO memory_queries (question, answer, confidence, sources) VALUES ($1,$2,$3,$4)',
+    [question, answer, confidence, sources]
+  );
+}
 
-  try {
-    return db.prepare(`SELECT c.* FROM captures_fts f JOIN captures c ON f.rowid = c.id WHERE captures_fts MATCH ? ORDER BY rank LIMIT ?`).all(keywords, limit);
-  } catch (err) {
-    console.error('[DB] Error FTS5:', err.message);
-    return [];
+export async function getMemoryQueries(limit = 20) {
+  const r = await query('SELECT * FROM memory_queries ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+export async function saveProject({ name, summary, stack, features, phases, spec, github_url }) {
+  const r = await query(
+    'INSERT INTO projects (name, summary, stack, features, phases, spec, github_url) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+    [name, summary, stack, features, phases, spec, github_url]
+  );
+  return r.rows[0];
+}
+
+export async function getProjects(limit = 10) {
+  const r = await query('SELECT * FROM projects ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
+
+export async function getProjectById(id) {
+  const r = await query('SELECT * FROM projects WHERE id = $1', [id]);
+  return r.rows[0] || null;
+}
+
+export async function getProjectTasks(projectId) {
+  const project = await getProjectById(projectId);
+  return project ? JSON.parse(project.features || '[]') : [];
+}
+
+export async function updateProjectFeatures(id, features) {
+  await query('UPDATE projects SET features=$1 WHERE id=$2', [features, id]);
+}
+
+export async function updateProjectStatus(id, status) {
+  await query('UPDATE projects SET status=$1 WHERE id=$2', [status, id]);
+}
+
+export async function getProjectsWithPhases(limit = 50) {
+  const r = await query('SELECT * FROM projects ORDER BY created_at DESC LIMIT $1', [limit]);
+  const projects = r.rows;
+  for (const p of projects) {
+    const ph = await query('SELECT * FROM project_phases WHERE project_id=$1 ORDER BY phase_num', [p.id]);
+    p.phases = ph.rows;
   }
-};
+  return projects;
+}
 
-export const getStats = () => ({
-  captures: db.prepare('SELECT COUNT(*) as n FROM captures').get().n,
-  projects: db.prepare('SELECT COUNT(*) as n FROM projects').get().n,
-  deploys: db.prepare('SELECT COUNT(*) as n FROM deploys').get().n,
-  memoryQueries: db.prepare('SELECT COUNT(*) as n FROM memory_queries').get().n,
-  devSessions: db.prepare('SELECT COUNT(*) as n FROM dev_sessions').get().n,
-});
+// ─── Project phases ───────────────────────────────────────────────────────────
 
-export default db;
+export async function insertPhase({ project_id, phase_num, phase_key }) {
+  await query(
+    "INSERT INTO project_phases (project_id, phase_num, phase_key, status) VALUES ($1,$2,$3,'pending')",
+    [project_id, phase_num, phase_key]
+  );
+}
+
+export async function updatePhase({ project_id, phase_key, status, output, notes }) {
+  await query(
+    'UPDATE project_phases SET status=$1, output=$2, notes=$3, updated_at=NOW() WHERE project_id=$4 AND phase_key=$5',
+    [status, output, notes, project_id, phase_key]
+  );
+}
+
+export async function getPhases(projectId) {
+  const r = await query('SELECT * FROM project_phases WHERE project_id=$1 ORDER BY phase_num', [projectId]);
+  return r.rows;
+}
+
+export async function getPhase(projectId, phaseKey) {
+  const r = await query('SELECT * FROM project_phases WHERE project_id=$1 AND phase_key=$2', [projectId, phaseKey]);
+  return r.rows[0] || null;
+}
+
+// ─── Dev sessions / Deploys ───────────────────────────────────────────────────
+
+export async function saveDevSession({ project_id, task, files, notes }) {
+  await query(
+    'INSERT INTO dev_sessions (project_id, task, files, notes) VALUES ($1,$2,$3,$4)',
+    [project_id, task, files, notes]
+  );
+}
+
+export async function getDevSessions(limit = 20) {
+  const r = await query('SELECT * FROM dev_sessions ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
+
+export async function saveDeploy({ project_name, deploy_url, project_url, status, files_count }) {
+  await query(
+    'INSERT INTO deploys (project_name, deploy_url, project_url, status, files_count) VALUES ($1,$2,$3,$4,$5)',
+    [project_name, deploy_url, project_url, status, files_count]
+  );
+}
+
+export async function getDeploys(limit = 20) {
+  const r = await query('SELECT * FROM deploys ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
+
+// ─── Research cache ───────────────────────────────────────────────────────────
+
+export async function saveResearchCache({ query_hash, query: q, depth, result, sources }) {
+  await query(
+    'INSERT INTO research_cache (query_hash, query, depth, result, sources) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (query_hash) DO UPDATE SET result=$4, sources=$5, created_at=NOW()',
+    [query_hash, q, depth, result, sources]
+  );
+}
+
+export async function getResearchCache(queryHash, maxAgeHours = 24) {
+  const r = await query(
+    "SELECT * FROM research_cache WHERE query_hash=$1 AND created_at > NOW() - ($2 || ' hours')::INTERVAL ORDER BY created_at DESC LIMIT 1",
+    [queryHash, maxAgeHours]
+  );
+  return r.rows[0] || null;
+}
+
+export async function getRecentResearches(limit = 10) {
+  const r = await query('SELECT id, query, depth, created_at FROM research_cache ORDER BY created_at DESC LIMIT $1', [limit]);
+  return r.rows;
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+export async function getStats() {
+  const [c, p, d, m, s] = await Promise.all([
+    query('SELECT COUNT(*) as n FROM captures'),
+    query('SELECT COUNT(*) as n FROM projects'),
+    query('SELECT COUNT(*) as n FROM deploys'),
+    query('SELECT COUNT(*) as n FROM memory_queries'),
+    query('SELECT COUNT(*) as n FROM dev_sessions'),
+  ]);
+  return {
+    captures: parseInt(c.rows[0].n),
+    projects: parseInt(p.rows[0].n),
+    deploys: parseInt(d.rows[0].n),
+    memoryQueries: parseInt(m.rows[0].n),
+    devSessions: parseInt(s.rows[0].n),
+  };
+}
+
+export default pool;

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node *)",
+      "Bash(curl *)",
+      "Bash(timeout *)",
+      "Bash(taskkill *)"
+    ]
+  },
+  "$version": 3
+}

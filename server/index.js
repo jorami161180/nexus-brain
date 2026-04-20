@@ -28,10 +28,13 @@ import {
   saveProject, insertPhase, updatePhase, updateProjectStatus,
   getPhases, getPhase, getProjectsWithPhases, getRecentResearches,
   createUser, getUserByEmail, getUserById, incrementUserRuns,
-  updateUserPlan, checkRunLimit,
-  createResetToken, getResetToken, markTokenUsed, updateUserPassword
+  updateUserPlan, checkRunLimit, countUsers,
+  createResetToken, getResetToken, markTokenUsed, updateUserPassword,
+  saveCapture, saveMemoryQuery, saveDevSession, saveDeploy, saveResearchCache, getResearchCache,
+  searchMemoryFTS, searchSemantic, updateCaptureEmbedding,
+  initDb
 } from './db.js';
-import db from './db.js';
+import pool from './db.js';
 import bcrypt from 'bcryptjs';
 import { signToken, requireAuth } from './middleware/auth.js';
 
@@ -64,11 +67,11 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
   }
   if (event.type === 'checkout.session.completed') {
     const userId = Number(event.data.object.metadata?.userId);
-    if (userId) updateUserPlan.run({ id: userId, plan: 'pro' });
+    if (userId) await updateUserPlan(userId, 'pro');
   }
   if (event.type === 'customer.subscription.deleted') {
     const email = event.data.object.customer_email;
-    if (email) { const u = getUserByEmail(email); if (u) updateUserPlan.run({ id: u.id, plan: 'free' }); }
+    if (email) { const u = await getUserByEmail(email); if (u) await updateUserPlan(u.id, 'free'); }
   }
   res.sendStatus(200);
 });
@@ -98,25 +101,24 @@ app.get('/api/ping', (_, res) => res.json({ ok: true }));
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
-app.get('/api/auth/status', (_, res) => {
-  const count = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
-  res.json({ hasUsers: count > 0 });
+app.get('/api/auth/status', async (_, res) => {
+  const n = await countUsers();
+  res.json({ hasUsers: n > 0 });
 });
 
 app.post('/api/auth/register', async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos' });
-  if (getUserByEmail(email)) return res.status(409).json({ error: 'El email ya está registrado' });
+  if (await getUserByEmail(email)) return res.status(409).json({ error: 'El email ya está registrado' });
   const password_hash = await bcrypt.hash(password, 10);
-  const result = createUser.run({ email: email.toLowerCase(), password_hash, name: name || email.split('@')[0] });
-  const user = getUserById(result.lastInsertRowid);
+  const user = await createUser({ email: email.toLowerCase(), password_hash, name: name || email.split('@')[0] });
   res.json({ token: signToken({ id: user.id, email: user.email }), user });
 });
 
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos' });
-  const user = getUserByEmail(email.toLowerCase());
+  const user = await getUserByEmail(email.toLowerCase());
   if (!user) return res.status(401).json({ error: 'Credenciales incorrectas' });
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Credenciales incorrectas' });
@@ -124,20 +126,19 @@ app.post('/api/auth/login', async (req, res) => {
   res.json({ token: signToken({ id: user.id, email: user.email }), user: safeUser });
 });
 
-app.get('/api/auth/me', requireAuth, (req, res) => {
-  const user = getUserById(req.user.id);
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  const user = await getUserById(req.user.id);
   if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
   res.json({ user });
 });
 
 app.post('/api/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
-  const user = getUserByEmail((email || '').toLowerCase());
-  // Siempre responder OK para no revelar si el email existe
+  const user = await getUserByEmail((email || '').toLowerCase());
   if (user) {
     const { randomBytes } = await import('crypto');
     const token = randomBytes(32).toString('hex');
-    createResetToken.run({ user_id: user.id, token });
+    await createResetToken({ user_id: user.id, token });
     const { sendResetEmail } = await import('./services/mailer.js');
     const appUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     await sendResetEmail(user.email, token, appUrl);
@@ -148,13 +149,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   const { token, password } = req.body;
   if (!token || !password) return res.status(400).json({ error: 'Datos incompletos' });
-  const record = getResetToken(token);
+  const record = await getResetToken(token);
   if (!record) return res.status(400).json({ error: 'Token inválido o expirado' });
   const hash = await bcrypt.hash(password, 10);
-  updateUserPassword.run({ hash, id: record.user_id });
-  markTokenUsed.run({ token });
+  await updateUserPassword(record.user_id, hash);
+  await markTokenUsed(token);
   res.json({ ok: true });
-
 });
 
 // Proteger todas las rutas /api/* excepto /auth/*
@@ -233,7 +233,7 @@ app.post('/api/chat', async (req, res) => {
     // 0. Recuperación de Memoria (RAG)
     let memoryContext = '';
     try {
-      const searchResults = db.prepare(`SELECT c.* FROM captures_fts f JOIN captures c ON f.rowid = c.id WHERE captures_fts MATCH ? ORDER BY rank LIMIT 3`).all(input.replace(/[^a-zA-Z0-9 ]/g, '') + '*');
+      const searchResults = await searchMemoryFTS(input);
       if (searchResults.length) {
         memoryContext = "--- MEMORIA RECUPERADA (Datos capturados anteriormente) ---\n" + 
           searchResults.map(r => `[${r.title}]: ${r.summary || r.content}`).join('\n') + "\n";
@@ -409,26 +409,22 @@ app.post('/api/memory/query', async (req, res) => {
   }
 });
 
-app.get('/api/memory/graph', (req, res) => {
+app.get('/api/memory/graph', async (req, res) => {
   try {
-    const captures = db.prepare('SELECT id, title, type, tags FROM captures').all();
+    const captures = await getCaptures(200);
     const nodes = captures.map(c => ({
       id: c.id,
       label: c.title,
       type: c.type,
       tags: c.tags ? c.tags.split(',').map(t => t.trim()) : []
     }));
-
     const links = [];
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const commonTags = nodes[i].tags.filter(t => nodes[j].tags.includes(t));
-        if (commonTags.length > 0) {
-          links.push({ source: nodes[i].id, target: nodes[j].id, value: commonTags.length });
-        }
+        if (commonTags.length > 0) links.push({ source: nodes[i].id, target: nodes[j].id, value: commonTags.length });
       }
     }
-
     res.json({ success: true, nodes, links });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -454,9 +450,9 @@ app.post('/api/projects', async (req, res) => {
 });
 
 
-app.get('/api/projects/:id', (req, res) => {
+app.get('/api/projects/:id', async (req, res) => {
   try {
-    const project = getProjectById(Number(req.params.id));
+    const project = await await getProjectById(Number(req.params.id));
     if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
     res.json(project);
   } catch (err) {
@@ -467,7 +463,7 @@ app.get('/api/projects/:id', (req, res) => {
 app.post('/api/projects/generate-steps', async (req, res) => {
   try {
     const { projectId, taskName } = req.body;
-    const project = getProjectById(Number(projectId));
+    const project = await getProjectById(Number(projectId));
     if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
     const result = await generateTaskSteps(project.name, project.summary, taskName);
@@ -485,7 +481,7 @@ app.post('/api/projects/generate-steps', async (req, res) => {
       } else {
         features[taskIndex].steps = result.steps;
       }
-      updateProjectFeatures.run({ features: JSON.stringify(features), id: project.id });
+      await updateProjectFeatures(project.id, JSON.stringify(features));
     }
 
     res.json(result);
@@ -534,9 +530,9 @@ app.post('/api/research', async (req, res) => {
     }
   } catch (err) {
     try {
-      const devPhase = getPhase(projectId, 'dev');
+      const devPhase = await getPhase(projectId, 'dev');
       if (devPhase?.output) {
-        updatePhase.run({
+        await updatePhase({
           project_id: projectId,
           phase_key: 'dev',
           status: 'done',
@@ -552,8 +548,8 @@ app.post('/api/research', async (req, res) => {
 });
 
 // ─── Investigaciones recientes (para historial) ───────────────────────────────
-app.get('/api/research/recent', (_, res) => {
-  try { res.json(getRecentResearches()); }
+app.get('/api/research/recent', async (_, res) => {
+  try { res.json(await getRecentResearches()); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -604,44 +600,37 @@ app.post('/api/deploy', async (req, res) => {
 // ─── Pipeline de Proyectos ────────────────────────────────────────────────────
 
 // Listar todos los proyectos con sus fases
-app.get('/api/pipeline', (_, res) => {
-  try { res.json(getProjectsWithPhases()); }
+app.get('/api/pipeline', async (_, res) => {
+  try { res.json(await getProjectsWithPhases()); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Crear nuevo proyecto con fases inicializadas
-app.post('/api/pipeline', (req, res) => {
+app.post('/api/pipeline', async (req, res) => {
   try {
     const { name, description } = req.body;
     if (!name) return res.status(400).json({ error: 'Nombre requerido' });
-    const info = saveProject.run({
+    const { id: projectId } = await saveProject({
       name, summary: description || '', stack: '{}',
       features: '[]', phases: '[]', spec: '', github_url: null
     });
-    const projectId = info.lastInsertRowid;
-    PHASES.forEach(p => insertPhase.run({ project_id: projectId, phase_num: p.num, phase_key: p.key }));
-    // Marcar fase idea como activa
-    updatePhase.run({ project_id: projectId, phase_key: 'idea', status: 'active', output: JSON.stringify({ description }), notes: '' });
+    for (const p of PHASES) await insertPhase({ project_id: projectId, phase_num: p.num, phase_key: p.key });
+    await updatePhase({ project_id: projectId, phase_key: 'idea', status: 'active', output: JSON.stringify({ description }), notes: '' });
     res.json({ success: true, id: projectId, projectId, name });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Obtener proyecto con fases — si no tiene fases las inicializa automáticamente
-app.get('/api/pipeline/:id', (req, res) => {
+app.get('/api/pipeline/:id', async (req, res) => {
   try {
-    const project = getProjectById(Number(req.params.id));
+    const project = await await await getProjectById(Number(req.params.id));
     if (!project) return res.status(404).json({ error: 'No encontrado' });
-    let phases = getPhases(project.id);
+    let phases = await await getPhases(project.id);
     if (!phases.length) {
-      // Proyecto creado fuera del pipeline (ej: vía chat) — inicializar fases
-      PHASES.forEach(p => insertPhase.run({ project_id: project.id, phase_num: p.num, phase_key: p.key }));
-      updatePhase.run({
-        project_id: project.id, phase_key: 'idea', status: 'active',
-        output: JSON.stringify({ description: project.summary }), notes: ''
-      });
-      phases = getPhases(project.id);
+      for (const p of PHASES) await insertPhase({ project_id: project.id, phase_num: p.num, phase_key: p.key });
+      await updatePhase({ project_id: project.id, phase_key: 'idea', status: 'active', output: JSON.stringify({ description: project.summary }), notes: '' });
+      phases = await await getPhases(project.id);
     }
-    // Auto-avanzar fases: si la anterior está done y la siguiente pending → activarla
     const order = ['idea', 'spec', 'dev', 'test', 'deploy', 'live'];
     const phaseMap = Object.fromEntries(phases.map(ph => [ph.phase_key, ph]));
     let advanced = false;
@@ -649,29 +638,28 @@ app.get('/api/pipeline/:id', (req, res) => {
       const cur = phaseMap[order[i]];
       const next = phaseMap[order[i + 1]];
       if (cur?.status === 'done' && next?.status === 'pending') {
-        updatePhase.run({ project_id: project.id, phase_key: order[i + 1], status: 'active', output: '', notes: '' });
+        await updatePhase({ project_id: project.id, phase_key: order[i + 1], status: 'active', output: '', notes: '' });
         advanced = true;
       }
     }
-    if (advanced) phases = getPhases(project.id);
-
+    if (advanced) phases = await await getPhases(project.id);
     project.phases = phases;
     res.json(project);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Actualizar estado/notas de una fase manualmente
-app.put('/api/pipeline/:id/phases/:phaseKey', (req, res) => {
+app.put('/api/pipeline/:id/phases/:phaseKey', async (req, res) => {
   try {
     const { status, notes, output } = req.body;
     const projectId = Number(req.params.id);
-    const phase = getPhase(projectId, req.params.phaseKey);
-    updatePhase.run({ 
-      project_id: projectId, 
-      phase_key: req.params.phaseKey, 
-      status: status || phase.status, 
-      output: output || phase.output || '', 
-      notes: notes || phase.notes || '' 
+    const phase = await await getPhase(projectId, req.params.phaseKey);
+    await updatePhase({
+      project_id: projectId,
+      phase_key: req.params.phaseKey,
+      status: status || phase.status,
+      output: output || phase.output || '',
+      notes: notes || phase.notes || ''
     });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -901,17 +889,17 @@ function normalizeHtmlForCompare(html = '') {
 
 async function runLandingTestingPhase({ projectId, project, send }) {
   send('progress', { message: 'Agente Testing iniciando...' });
-  updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'running', output: '', notes: '' });
+  await updatePhase({ project_id: projectId, phase_key: 'test', status: 'running', output: '', notes: '' });
 
-  const devPhase = getPhase(projectId, 'dev');
+  const devPhase = await getPhase(projectId, 'dev');
   const devData = parsePhaseOutput(devPhase);
-  const specPhase = getPhase(projectId, 'spec');
+  const specPhase = await getPhase(projectId, 'spec');
   const spec = parsePhaseOutput(specPhase);
   const htmlFile = devData.files?.find(f => f.path?.endsWith('.html') || f.path === 'index.html');
 
   if (!htmlFile?.code) {
     send('progress', { message: 'No se encontro HTML para testear' });
-    updatePhase.run({
+    await updatePhase({
       project_id: projectId,
       phase_key: 'test',
       status: 'error',
@@ -930,7 +918,7 @@ async function runLandingTestingPhase({ projectId, project, send }) {
 
   if (!result.success) {
     send('progress', { message: `Error en testing: ${result.error}` });
-    updatePhase.run({
+    await updatePhase({
       project_id: projectId,
       phase_key: 'test',
       status: 'error',
@@ -945,21 +933,21 @@ async function runLandingTestingPhase({ projectId, project, send }) {
 
   if (report.passed) {
     send('progress', { message: 'Landing aprobada - activando Deploy' });
-    updatePhase.run({
+    await updatePhase({
       project_id: projectId,
       phase_key: 'test',
       status: 'done',
       output: JSON.stringify(report),
       notes: `Score: ${report.score}/100`
     });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'active', output: '', notes: '' });
-    updateProjectStatus.run({ id: projectId, status: 'tested' });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'active', output: '', notes: '' });
+    await updateProjectStatus(projectId, 'tested');
     return { success: true, data: report, approved: true, devData };
   }
 
   const criticalIssues = report.issues.filter(issue => issue.severity === 'critical');
   send('progress', { message: `Landing necesita mejoras - Score: ${report.score}/100` });
-  updatePhase.run({
+  await updatePhase({
     project_id: projectId,
     phase_key: 'test',
     status: 'failed',
@@ -977,18 +965,18 @@ async function runLandingTestingPhase({ projectId, project, send }) {
 
 async function runDeployPhase({ projectId, project, files, send }) {
   send('progress', { message: 'Agente Deploy iniciando...' });
-  updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'running', output: '', notes: '' });
+  await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'running', output: '', notes: '' });
   send('progress', { message: 'Subiendo archivos a Vercel...' });
 
   const result = await deploy({ projectName: project.name, files });
   if (result.success) {
     send('progress', { message: `Desplegado en ${result.data.projectUrl}` });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'done', output: JSON.stringify(result.data), notes: '' });
-    updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'active', output: '', notes: '' });
-    updateProjectStatus.run({ id: projectId, status: 'deployed' });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'done', output: JSON.stringify(result.data), notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'live', status: 'active', output: '', notes: '' });
+    await updateProjectStatus(projectId, 'deployed');
   } else {
     send('progress', { message: `Deploy no completado: ${result.error}` });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
   }
   return result;
 }
@@ -1011,29 +999,29 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
     // Rate limiting — solo fases que consumen créditos
     const METERED_PHASES = ['spec', 'dev', 'test', 'deploy'];
     if (METERED_PHASES.includes(phaseKey)) {
-      const user = getUserById(req.user.id);
+      const user = await getUserById(req.user.id);
       const { allowed, used, limit } = checkRunLimit(user);
       if (!allowed) {
         send('error', { error: `Límite del plan alcanzado (${used}/${limit} runs). Actualiza a Pro para continuar.` });
         return res.end();
       }
-      incrementUserRuns.run({ id: req.user.id });
+      await incrementUserRuns(req.user.id);
     }
 
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) { send('error', { error: 'Proyecto no encontrado' }); return res.end(); }
 
     let result;
 
     if (phaseKey === 'idea') {
       send('progress', { message: 'Confirmando idea...' });
-      updatePhase.run({ project_id: projectId, phase_key: 'idea', status: 'done', output: JSON.stringify({ description: project.summary, notes: req.body.notes || '' }), notes: req.body.notes || '' });
-      updatePhase.run({ project_id: projectId, phase_key: 'spec', status: 'active', output: '', notes: '' });
+      await updatePhase({ project_id: projectId, phase_key: 'idea', status: 'done', output: JSON.stringify({ description: project.summary, notes: req.body.notes || '' }), notes: req.body.notes || '' });
+      await updatePhase({ project_id: projectId, phase_key: 'spec', status: 'active', output: '', notes: '' });
       result = { success: true, data: { message: 'Idea confirmada — listo para especificación' } };
 
     } else if (phaseKey === 'spec') {
       send('progress', { message: 'Agente Arquitecto iniciando...' });
-      updatePhase.run({ project_id: projectId, phase_key: 'spec', status: 'running', output: '', notes: '' });
+      await updatePhase({ project_id: projectId, phase_key: 'spec', status: 'running', output: '', notes: '' });
       send('progress', { message: 'Diseñando stack y arquitectura...' });
 
       // Timeout de 90 segundos para evitar bloqueo indefinido
@@ -1053,18 +1041,18 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
 
       if (result.success) {
         send('progress', { message: 'Blueprint generado — guardando...' });
-        updatePhase.run({ project_id: projectId, phase_key: 'spec', status: 'done', output: JSON.stringify(result.data), notes: '' });
-        updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'active', output: '', notes: '' });
-        updateProjectStatus.run({ id: projectId, status: 'spec' });
+        await updatePhase({ project_id: projectId, phase_key: 'spec', status: 'done', output: JSON.stringify(result.data), notes: '' });
+        await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'active', output: '', notes: '' });
+        await updateProjectStatus(projectId, 'spec');
       } else {
         send('progress', { message: `Error en especificación: ${result.error}` });
-        updatePhase.run({ project_id: projectId, phase_key: 'spec', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+        await updatePhase({ project_id: projectId, phase_key: 'spec', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
       }
 
     } else if (phaseKey === 'dev') {
       send('progress', { message: 'Agente Developer iniciando...' });
-      updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'running', output: '', notes: '' });
-      const specPhase = getPhase(projectId, 'spec');
+      await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'running', output: '', notes: '' });
+      const specPhase = await getPhase(projectId, 'spec');
       const spec = specPhase?.output ? JSON.parse(specPhase.output) : {};
       send('progress', { message: `Generando código para "${project.name}"...` });
 
@@ -1083,8 +1071,8 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
       if (result.success) {
         const fileCount = result.data.files?.length || 0;
         send('progress', { message: `${fileCount} archivos generados — guardando en workspace...` });
-        updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(result.data), notes: '' });
-        updateProjectStatus.run({ id: projectId, status: 'dev' });
+        await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(result.data), notes: '' });
+        await updateProjectStatus(projectId, 'dev');
         send('progress', { message: 'Activando testing automatico de la landing...' });
         const testResult = await runLandingTestingPhase({ projectId, project, send });
         if (testResult?.approved) {
@@ -1098,7 +1086,7 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
           result = testResult;
         }
       } else {
-        updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+        await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
       }
 
     } else if (phaseKey === 'test') {
@@ -1114,12 +1102,12 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
 
     } else if (phaseKey === 'test_legacy') {
       send('progress', { message: '🧪 Agente Testing iniciando...' });
-      updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'running', output: '', notes: '' });
+      await updatePhase({ project_id: projectId, phase_key: 'test', status: 'running', output: '', notes: '' });
 
       // Obtener HTML del dev phase
-      const devPhase = getPhase(projectId, 'dev');
+      const devPhase = await getPhase(projectId, 'dev');
       const devData = devPhase?.output ? JSON.parse(devPhase.output) : {};
-      const specPhase = getPhase(projectId, 'spec');
+      const specPhase = await getPhase(projectId, 'spec');
       const spec = specPhase?.output ? JSON.parse(specPhase.output) : {};
 
       // Buscar el archivo HTML principal
@@ -1127,7 +1115,7 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
 
       if (!htmlFile?.code) {
         send('progress', { message: '❌ No se encontró HTML para testear' });
-        updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'error', output: JSON.stringify({ error: 'No hay HTML para validar' }), notes: 'Error: Developer no generó HTML' });
+        await updatePhase({ project_id: projectId, phase_key: 'test', status: 'error', output: JSON.stringify({ error: 'No hay HTML para validar' }), notes: 'Error: Developer no generó HTML' });
         result = { success: false, error: 'No se encontró HTML generado en la fase de desarrollo' };
       } else {
         send('progress', { message: '🔍 Validando estructura y placeholders...' });
@@ -1146,13 +1134,13 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
 
           if (testReport.passed) {
             send('progress', { message: '✅ Landing aprobada — listo para deploy' });
-            updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'done', output: JSON.stringify(testReport), notes: `Score: ${testReport.score}/100` });
-            updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'active', output: '', notes: '' });
-            updateProjectStatus.run({ id: projectId, status: 'tested' });
+            await updatePhase({ project_id: projectId, phase_key: 'test', status: 'done', output: JSON.stringify(testReport), notes: `Score: ${testReport.score}/100` });
+            await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'active', output: '', notes: '' });
+            await updateProjectStatus(projectId, 'tested');
           } else {
             send('progress', { message: `⚠️ Landing necesita mejoras — Score: ${testReport.score}/100` });
             const criticalIssues = testReport.issues.filter(i => i.severity === 'critical');
-            updatePhase.run({
+            await updatePhase({
               project_id: projectId,
               phase_key: 'test',
               status: 'failed',
@@ -1168,38 +1156,38 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
           }
         } else {
           send('progress', { message: `❌ Error en testing: ${result.error}` });
-          updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+          await updatePhase({ project_id: projectId, phase_key: 'test', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
         }
       }
 
     } else if (phaseKey === 'deploy') {
-      const devPhase = getPhase(projectId, 'dev');
+      const devPhase = await getPhase(projectId, 'dev');
       const devData = devPhase?.output ? JSON.parse(devPhase.output) : {};
       result = await runDeployPhase({ projectId, project, files: devData.files || [], send });
 
     } else if (phaseKey === 'deploy_legacy') {
       send('progress', { message: 'Agente Deploy iniciando...' });
-      updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'running', output: '', notes: '' });
-      const devPhase = getPhase(projectId, 'dev');
+      await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'running', output: '', notes: '' });
+      const devPhase = await getPhase(projectId, 'dev');
       const devData = devPhase?.output ? JSON.parse(devPhase.output) : {};
       send('progress', { message: 'Subiendo archivos a Vercel...' });
       result = await deploy({ projectName: project.name, files: devData.files || [] });
       if (result.success) {
         send('progress', { message: `Desplegado en ${result.data.projectUrl}` });
-        updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'done', output: JSON.stringify(result.data), notes: '' });
-        updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'active', output: '', notes: '' });
-        updateProjectStatus.run({ id: projectId, status: 'deployed' });
+        await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'done', output: JSON.stringify(result.data), notes: '' });
+        await updatePhase({ project_id: projectId, phase_key: 'live', status: 'active', output: '', notes: '' });
+        await updateProjectStatus(projectId, 'deployed');
       } else {
-        updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+        await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
       }
 
     } else if (phaseKey === 'live') {
       send('progress', { message: 'Marcando proyecto como live...' });
-      const deployPhase = getPhase(projectId, 'deploy');
+      const deployPhase = await getPhase(projectId, 'deploy');
       const deployData = parsePhaseOutput(deployPhase);
       const liveUrl = req.body.url || deployData.projectUrl || deployData.deployUrl || '';
-      updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'done', output: JSON.stringify({ url: liveUrl, notes: req.body.notes || '' }), notes: req.body.notes || '' });
-      updateProjectStatus.run({ id: projectId, status: 'live' });
+      await updatePhase({ project_id: projectId, phase_key: 'live', status: 'done', output: JSON.stringify({ url: liveUrl, notes: req.body.notes || '' }), notes: req.body.notes || '' });
+      await updateProjectStatus(projectId, 'live');
       result = { success: true, data: { message: '🚀 Proyecto en producción' } };
 
     } else {
@@ -1214,7 +1202,7 @@ app.post('/api/pipeline/:id/run/:phaseKey', async (req, res) => {
     }
   } catch (err) {
     console.error(`[Pipeline] Error en fase ${phaseKey}:`, err);
-    try { updatePhase.run({ project_id: projectId, phase_key: phaseKey, status: 'error', output: JSON.stringify({ error: err.message }), notes: err.message }); } catch { }
+    try { await updatePhase({ project_id: projectId, phase_key: phaseKey, status: 'error', output: JSON.stringify({ error: err.message }), notes: err.message }); } catch { }
     send('error', { error: err.message });
   } finally {
     res.end();
@@ -1235,10 +1223,10 @@ app.post('/api/pipeline/:id/phases/:phaseKey/approve', async (req, res) => {
   const { notes, bugs, coverage, url } = req.body;
 
   try {
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) throw new Error('Proyecto no encontrado');
 
-    const currentPhase = getPhase(projectId, phaseKey);
+    const currentPhase = await getPhase(projectId, phaseKey);
     const outputData = parsePhaseOutput(currentPhase);
 
     // Actualizar datos según la fase
@@ -1252,7 +1240,7 @@ app.post('/api/pipeline/:id/phases/:phaseKey/approve', async (req, res) => {
 
     send('progress', { message: `Aprobando fase ${phaseKey}...` });
 
-    updatePhase.run({
+    await updatePhase({
       project_id: projectId,
       phase_key: phaseKey,
       status: 'done',
@@ -1265,7 +1253,7 @@ app.post('/api/pipeline/:id/phases/:phaseKey/approve', async (req, res) => {
     const idx = order.indexOf(phaseKey);
     if (idx !== -1 && idx < order.length - 1) {
       const nextKey = order[idx + 1];
-      updatePhase.run({ project_id: projectId, phase_key: nextKey, status: 'active', output: '', notes: '' });
+      await updatePhase({ project_id: projectId, phase_key: nextKey, status: 'active', output: '', notes: '' });
       send('progress', { message: `Fase ${nextKey.toUpperCase()} activada` });
     }
 
@@ -1278,28 +1266,27 @@ app.post('/api/pipeline/:id/phases/:phaseKey/approve', async (req, res) => {
 });
 
 // ─── Historial ────────────────────────────────────────────────────────────────
-app.get('/api/history/stats', (_, res) => res.json(getStats()));
-
-app.get('/api/history/captures', (req, res) => res.json(getCaptures(Number(req.query.limit) || 50)));
-app.get('/api/history/projects', (req, res) => res.json(getProjects(Number(req.query.limit) || 20)));
-app.get('/api/history/deploys', (req, res) => res.json(getDeploys(Number(req.query.limit) || 20)));
-app.get('/api/history/memory', (req, res) => res.json(getMemoryQueries(Number(req.query.limit) || 20)));
-app.get('/api/history/dev', (req, res) => res.json(getDevSessions(Number(req.query.limit) || 20)));
-app.get('/api/history/search', (req, res) => res.json(searchCaptures(req.query.q || '')));
+app.get('/api/history/stats', async (_, res) => { try { res.json(await getStats()); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/captures', async (req, res) => { try { res.json(await getCaptures(Number(req.query.limit) || 50)); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/projects', async (req, res) => { try { res.json(await getProjects(Number(req.query.limit) || 20)); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/deploys', async (req, res) => { try { res.json(await getDeploys(Number(req.query.limit) || 20)); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/memory', async (req, res) => { try { res.json(await getMemoryQueries(Number(req.query.limit) || 20)); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/dev', async (req, res) => { try { res.json(await getDevSessions(Number(req.query.limit) || 20)); } catch(e) { res.status(500).json({error:e.message}); } });
+app.get('/api/history/search', async (req, res) => { try { res.json(await searchCaptures(req.query.q || '')); } catch(e) { res.status(500).json({error:e.message}); } });
 
 // ─── Edición de Proyectos ──────────────────────────────────────────────────────
-app.patch('/api/pipeline/:id', (req, res) => {
+app.patch('/api/pipeline/:id', async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const { name, summary } = req.body;
-    let queries = [];
-    if (name !== undefined) queries.push(`name = '${name.replace(/'/g, "''")}'`);
-    if (summary !== undefined) queries.push(`summary = '${summary.replace(/'/g, "''")}'`);
-    
-    if (queries.length > 0) {
-      db.prepare(`UPDATE projects SET ${queries.join(', ')} WHERE id = ?`).run(projectId);
+    const updates = [];
+    const values = [];
+    if (name !== undefined) { updates.push(`name = $${values.length + 1}`); values.push(name); }
+    if (summary !== undefined) { updates.push(`summary = $${values.length + 1}`); values.push(summary); }
+    if (updates.length > 0) {
+      values.push(projectId);
+      await pool.query(`UPDATE projects SET ${updates.join(', ')} WHERE id = $${values.length}`, values);
     }
-    
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1316,7 +1303,7 @@ app.post('/api/pipeline/:id/refine', async (req, res) => {
 
   const projectId = Number(req.params.id);
   try {
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) { send('error', { error: 'Proyecto no encontrado' }); return res.end(); }
 
     const feedback = String(req.body.feedback || '').trim();
@@ -1325,7 +1312,7 @@ app.post('/api/pipeline/:id/refine', async (req, res) => {
       return;
     }
 
-    const devPhaseCurrent = getPhase(projectId, 'dev');
+    const devPhaseCurrent = await getPhase(projectId, 'dev');
     const currentData = parsePhaseOutput(devPhaseCurrent);
     const currentHtmlFile = getPrimaryHtmlFile(currentData);
     if (!currentHtmlFile?.code) {
@@ -1334,7 +1321,7 @@ app.post('/api/pipeline/:id/refine', async (req, res) => {
     }
 
     send('progress', { message: 'Agente Developer aplicando tus instrucciones al HTML actual...' });
-    updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'running', output: devPhaseCurrent?.output || '', notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'running', output: devPhaseCurrent?.output || '', notes: '' });
     setTimeout(() => {
       send('progress', { message: 'Reescribiendo la landing existente sin perder estructura, SEO ni responsive...' });
     }, 5000);
@@ -1362,7 +1349,7 @@ ${currentHtmlFile.code}`;
     );
     const parsed = parseFullHtmlResponse(ai.text);
     if (!parsed?.html || !/<html[\s\S]*<\/html>/i.test(parsed.html)) {
-      updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: devPhaseCurrent?.output || JSON.stringify(currentData), notes: 'Refinado no aplicado: respuesta invalida' });
+      await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: devPhaseCurrent?.output || JSON.stringify(currentData), notes: 'Refinado no aplicado: respuesta invalida' });
       send('error', { error: 'El modelo no devolvio un HTML completo valido. Prueba con un mandato mas concreto o usa Revisar Secciones.' });
       return;
     }
@@ -1371,22 +1358,22 @@ ${currentHtmlFile.code}`;
     currentData.workspace_path = writeProjectFilesToWorkspace(project, currentData.files);
     currentData.notes = `${currentData.notes || ''}\nRefinado global: ${feedback}`.trim();
 
-    updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(currentData), notes: `Refinado: ${feedback}` });
-    updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras refinado global' });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
-    updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
-    updateProjectStatus.run({ id: projectId, status: 'dev' });
+    await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(currentData), notes: `Refinado: ${feedback}` });
+    await updatePhase({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras refinado global' });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
+    await updateProjectStatus(projectId, 'dev');
     send('progress', { message: 'HTML actualizado. Vuelve a ejecutar QA completo antes de desplegar.' });
     send('done', { data: currentData });
     return;
 
-    const devPhase = getPhase(projectId, 'dev');
+    const devPhase = await getPhase(projectId, 'dev');
     const prevData = devPhase?.output ? JSON.parse(devPhase.output) : {};
-    const specPhase = getPhase(projectId, 'spec');
+    const specPhase = await getPhase(projectId, 'spec');
     const spec = specPhase?.output ? JSON.parse(specPhase.output) : {};
 
     send('progress', { message: 'Agente Developer refinando código...' });
-    updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'running', output: devPhase?.output || '', notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'running', output: devPhase?.output || '', notes: '' });
 
     const legacyFeedback = req.body.feedback || '';
 
@@ -1410,17 +1397,17 @@ ${currentHtmlFile.code}`;
 
     if (result.success) {
       send('progress', { message: `${result.data.files?.length || 0} archivos actualizados` });
-      updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(result.data), notes: `Refinado: ${feedback}` });
+      await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(result.data), notes: `Refinado: ${feedback}` });
       send('done', { data: result.data });
     } else {
-      updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
+      await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'error', output: JSON.stringify({ error: result.error }), notes: result.error });
       send('error', { error: result.error });
     }
   } catch (err) {
     try {
-      const devPhase = getPhase(projectId, 'dev');
+      const devPhase = await getPhase(projectId, 'dev');
       if (devPhase?.output) {
-        updatePhase.run({
+        await updatePhase({
           project_id: projectId,
           phase_key: 'dev',
           status: 'done',
@@ -1436,13 +1423,13 @@ ${currentHtmlFile.code}`;
 });
 
 // ─── Settings — muestra qué claves API están configuradas ────────────────────
-app.get('/api/pipeline/:id/sections', (req, res) => {
+app.get('/api/pipeline/:id/sections', async (req, res) => {
   try {
     const projectId = Number(req.params.id);
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
-    const devPhase = getPhase(projectId, 'dev');
+    const devPhase = await getPhase(projectId, 'dev');
     const devData = parsePhaseOutput(devPhase);
     const htmlFile = getPrimaryHtmlFile(devData);
     if (!htmlFile?.code) return res.status(404).json({ error: 'No hay HTML generado para revisar' });
@@ -1462,10 +1449,10 @@ app.post('/api/pipeline/:id/sections/:sectionIndex/refine', async (req, res) => 
     const mode = req.body.mode === 'visual' ? 'visual' : 'copy';
     if (!prompt) return res.status(400).json({ error: 'Prompt requerido' });
 
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
-    const devPhase = getPhase(projectId, 'dev');
+    const devPhase = await getPhase(projectId, 'dev');
     const devData = parsePhaseOutput(devPhase);
     const htmlFile = getPrimaryHtmlFile(devData);
     if (!htmlFile?.code) return res.status(404).json({ error: 'No hay HTML generado para revisar' });
@@ -1535,11 +1522,11 @@ ${compactHtml}`;
     devData.workspace_path = writeProjectFilesToWorkspace(project, devData.files);
     devData.notes = `${devData.notes || ''}\nRefinado de seccion "${part.label}": ${prompt}`.trim();
 
-    updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(devData), notes: `Seccion refinada: ${part.label}` });
-    updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras refinado de seccion' });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
-    updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
-    updateProjectStatus.run({ id: projectId, status: 'dev' });
+    await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(devData), notes: `Seccion refinada: ${part.label}` });
+    await updatePhase({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras refinado de seccion' });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
+    await updateProjectStatus(projectId, 'dev');
 
     const sections = extractLandingParts(updatedHtml).map(({ start, end, ...p }) => p);
     res.json({
@@ -1553,7 +1540,7 @@ ${compactHtml}`;
   }
 });
 
-app.put('/api/pipeline/:id/sections/:sectionIndex', (req, res) => {
+app.put('/api/pipeline/:id/sections/:sectionIndex', async (req, res) => {
   try {
     const projectId = Number(req.params.id);
     const sectionIndex = Number(req.params.sectionIndex);
@@ -1561,10 +1548,10 @@ app.put('/api/pipeline/:id/sections/:sectionIndex', (req, res) => {
     const fields = Array.isArray(req.body.fields) ? req.body.fields : null;
     if (!html && !fields?.length) return res.status(400).json({ error: 'Contenido requerido' });
 
-    const project = getProjectById(projectId);
+    const project = await getProjectById(projectId);
     if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
-    const devPhase = getPhase(projectId, 'dev');
+    const devPhase = await getPhase(projectId, 'dev');
     const devData = parsePhaseOutput(devPhase);
     const htmlFile = getPrimaryHtmlFile(devData);
     if (!htmlFile?.code) return res.status(404).json({ error: 'No hay HTML generado para revisar' });
@@ -1582,11 +1569,11 @@ app.put('/api/pipeline/:id/sections/:sectionIndex', (req, res) => {
     devData.workspace_path = writeProjectFilesToWorkspace(project, devData.files);
     devData.notes = `${devData.notes || ''}\nEdicion manual de seccion "${part.label}"`.trim();
 
-    updatePhase.run({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(devData), notes: `Seccion editada manualmente: ${part.label}` });
-    updatePhase.run({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras edicion manual de seccion' });
-    updatePhase.run({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
-    updatePhase.run({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
-    updateProjectStatus.run({ id: projectId, status: 'dev' });
+    await updatePhase({ project_id: projectId, phase_key: 'dev', status: 'done', output: JSON.stringify(devData), notes: `Seccion editada manualmente: ${part.label}` });
+    await updatePhase({ project_id: projectId, phase_key: 'test', status: 'active', output: '', notes: 'Pendiente tras edicion manual de seccion' });
+    await updatePhase({ project_id: projectId, phase_key: 'deploy', status: 'pending', output: '', notes: '' });
+    await updatePhase({ project_id: projectId, phase_key: 'live', status: 'pending', output: '', notes: '' });
+    await updateProjectStatus(projectId, 'dev');
 
     const sections = extractLandingParts(updatedHtml).map(({ start, end, ...p }) => p);
     res.json({ success: true, section: sections[sectionIndex] || null, sections });
@@ -1653,7 +1640,7 @@ app.get('/api/obsidian/test', async (_, res) => {
 });
 
 app.post('/api/pipeline/:id/obsidian', async (req, res) => {
-  const project = getProjectById(Number(req.params.id));
+  const project = await await getProjectById(Number(req.params.id));
   if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
   const { syncToObsidian } = await import('./services/obsidiansync.js');
   const { exportProjectToObsidian } = await import('./export.js');
@@ -1689,7 +1676,7 @@ app.post('/api/github/create-repo', async (req, res) => {
 
     // 2. Si hay proyecto, leer archivos del workspace y hacer push via API
     if (projectId) {
-      const project = getProjectById(Number(projectId));
+      const project = await getProjectById(Number(projectId));
       const safeName = (project?.name || repoName).toLowerCase().replace(/[^a-z0-9-_]/g, '-').slice(0, 50);
       const wsPath = path.join(ROOT, 'workspace', safeName);
 
@@ -1715,7 +1702,7 @@ app.post('/api/github/create-repo', async (req, res) => {
       }
 
       // Guardar URL en el proyecto
-      db.prepare('UPDATE projects SET github_url=? WHERE id=?').run(repo.html_url, Number(projectId));
+      await pool.query('UPDATE projects SET github_url=$1 WHERE id=$2', [repo.html_url, Number(projectId)]);
     }
 
     res.json({ success: true, url: repo.html_url, fullName: repo.full_name });
@@ -1726,11 +1713,11 @@ app.post('/api/github/create-repo', async (req, res) => {
 });
 
 // ─── Export pipeline como Markdown ───────────────────────────────────────────
-app.get('/api/pipeline/:id/export', (req, res) => {
-  const project = getProjectById(Number(req.params.id));
+app.get('/api/pipeline/:id/export', async (req, res) => {
+  const project = await await getProjectById(Number(req.params.id));
   if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
-  const phases = getPhases(Number(req.params.id));
+  const phases = await getPhases(Number(req.params.id));
   const STATUS_ICON = { done: '✅', active: '🔵', running: '⏳', error: '❌', pending: '⬜' };
 
   let md = `# ${project.name}\n\n`;
@@ -1784,7 +1771,7 @@ app.get('/api/pipeline/:id/export', (req, res) => {
 
 // ─── Export workspace como ZIP ────────────────────────────────────────────────
 app.get('/api/pipeline/:id/export-zip', async (req, res) => {
-  const project = getProjectById(Number(req.params.id));
+  const project = await await getProjectById(Number(req.params.id));
   if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
   const safeName = (project.name || `project-${req.params.id}`)
@@ -1815,7 +1802,7 @@ app.post('/api/billing/checkout', async (req, res) => {
   if (!secret) return res.status(400).json({ error: 'Stripe no configurado. Añade STRIPE_SECRET_KEY al .env' });
   const { default: Stripe } = await import('stripe');
   const stripe = new Stripe(secret);
-  const user = getUserById(req.user.id);
+  const user = await getUserById(req.user.id);
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -1836,7 +1823,7 @@ app.post('/api/billing/portal', async (req, res) => {
   const { default: Stripe } = await import('stripe');
   const stripe = new Stripe(secret);
 
-  const user = getUserById(req.user.id);
+  const user = await getUserById(req.user.id);
   const customers = await stripe.customers.list({ email: user.email, limit: 1 });
   if (!customers.data.length) return res.status(404).json({ error: 'Cliente Stripe no encontrado' });
 
@@ -1847,25 +1834,27 @@ app.post('/api/billing/portal', async (req, res) => {
   res.json({ url: session.url });
 });
 
-app.get('/api/billing/status', (req, res) => {
-  const user = getUserById(req.user.id);
+app.get('/api/billing/status', async (req, res) => {
+  const user = await getUserById(req.user.id);
   const { used, limit } = checkRunLimit(user);
   res.json({ plan: user.plan, runs_used: used, limit, stripe_configured: !!process.env.STRIPE_SECRET_KEY });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`\n🧠 Nexus Brain Server running on http://localhost:${PORT}`);
-  console.log(`   Agents: Orchestrator · Capture · Classifier · Memory · Projects · Writer · Researcher · Architect · Developer · Deploy\n`);
+initDb().then(() => {
+  const server = app.listen(PORT, () => {
+    console.log(`\n🧠 Nexus Brain Server running on http://localhost:${PORT}`);
+    console.log(`   Agents: Orchestrator · Capture · Classifier · Memory · Projects · Writer · Researcher · Architect · Developer · Deploy\n`);
+  });
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      console.error(`\n❌ ERROR: El puerto ${PORT} ya está en uso.\n`);
+      process.exit(1);
+    } else {
+      console.error('Error al iniciar el servidor:', e);
+    }
+  });
+}).catch(err => {
+  console.error('❌ Error inicializando DB:', err.message);
+  process.exit(1);
 });
 
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error(`\n❌ ERROR: El puerto ${PORT} ya está en uso.`);
-    console.error(`   1. Cierra otras instancias de Nexus Brain.`);
-    console.error(`   2. O cambia el puerto: 'set PORT=3003 && npm start'`);
-    console.error(`   3. O mata el proceso: 'Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force' en PowerShell.\n`);
-    process.exit(1);
-  } else {
-    console.error('Error al iniciar el servidor:', e);
-  }
-});
