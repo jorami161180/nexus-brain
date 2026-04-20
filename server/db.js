@@ -1,9 +1,11 @@
 import pg from 'pg';
 const { Pool } = pg;
 
+const dbUrl = process.env.DATABASE_URL || '';
+console.log('[DB] Connecting to:', dbUrl.replace(/:([^:@]+)@/, ':***@'));
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+  connectionString: dbUrl,
+  ssl: dbUrl ? { rejectUnauthorized: false } : false,
 });
 
 const query = (text, params) => pool.query(text, params);
