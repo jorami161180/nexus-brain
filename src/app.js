@@ -555,14 +555,17 @@ class NexusBrain {
         <span class="material-symbols-outlined text-[#FF9800] text-3xl opacity-80">verified_user</span>
       </div>`;
     }
-    if (key === 'deploy' && (out.deployUrl || out.url)) {
-      const url = out.deployUrl || out.url;
-      return `<div class="bg-[#080808] border border-[#00BCD4]/20 rounded-2xl p-4 mb-3">
-        <p class="text-[0.5rem] font-black text-[#00BCD4] uppercase tracking-widest mb-1">Entorno de Staging</p>
-        <p class="text-[0.65rem] text-[#888] line-clamp-1 mb-3">${esc(url)}</p>
-        <a href="${esc(url)}" target="_blank" class="block w-full text-center text-xs py-2.5 rounded-xl border border-[#00BCD4]/40 text-[#00BCD4] hover:bg-[#00BCD4]/10 hover:shadow-[0_0_15px_rgba(0,188,212,0.2)] transition-all font-bold flex justify-center items-center gap-2">
-          <span class="material-symbols-outlined text-sm">rocket_launch</span> Acceder a Staging
-        </a>
+    if (key === 'deploy' && (out.deployUrl || out.projectUrl || out.url)) {
+      const deployUrl = out.deployUrl || out.url;
+      const projectUrl = out.projectUrl;
+      return `<div class="bg-[#080808] border border-[#00BCD4]/20 rounded-2xl p-4 mb-3 space-y-2">
+        <p class="text-[0.5rem] font-black text-[#00BCD4] uppercase tracking-widest mb-1">Deploy en Vercel</p>
+        ${deployUrl ? `<a href="${esc(deployUrl)}" target="_blank" class="block w-full text-center text-xs py-2.5 rounded-xl border border-[#00BCD4]/40 text-[#00BCD4] hover:bg-[#00BCD4]/10 transition-all font-bold flex justify-center items-center gap-2">
+          <span class="material-symbols-outlined text-sm">rocket_launch</span> Ver Deploy
+        </a>` : ''}
+        ${projectUrl ? `<a href="${esc(projectUrl)}" target="_blank" class="block w-full text-center text-xs py-2.5 rounded-xl bg-[#00BCD4] text-black hover:opacity-90 transition-all font-bold flex justify-center items-center gap-2">
+          <span class="material-symbols-outlined text-sm">open_in_new</span> Abrir en Producción
+        </a>` : ''}
       </div>`;
     }
     if (key === 'live' && out.url) {
