@@ -75,12 +75,19 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
 
 app.use(express.json({ limit: '10mb' }));
 
-// Servir frontend estático desde la raíz del proyecto
+// Servir frontend estático
 const ROOT = path.resolve(__dirname, '..');
-app.use(express.static(ROOT, { index: false }));
+const DIST = path.join(ROOT, 'dist');
+const isProd = process.env.NODE_ENV === 'production' && fs.existsSync(DIST);
+
+if (isProd) {
+  app.use(express.static(DIST, { index: false }));
+} else {
+  app.use(express.static(ROOT, { index: false }));
+}
 app.use('/public', express.static(path.join(ROOT, 'public')));
 app.get('/', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
-app.get('/app', (_, res) => res.sendFile(path.join(ROOT, 'index.html')));
+app.get('/app', (_, res) => res.sendFile(isProd ? path.join(DIST, 'index.html') : path.join(ROOT, 'index.html')));
 app.get('/landing', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
 
 // Health check

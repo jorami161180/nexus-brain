@@ -1,6 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm install --include=dev"
+buildCommand = "npm install --include=dev && npm run build"
 
 [deploy]
 startCommand = "mkdir -p /app/data && node --import tsx/esm server/index.js"
