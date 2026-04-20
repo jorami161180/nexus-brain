@@ -89,6 +89,7 @@ if (isProd) {
   app.use(express.static(ROOT, { index: false }));
 }
 app.use('/public', express.static(path.join(ROOT, 'public')));
+app.use('/workspace', express.static(path.join(ROOT, 'workspace')));
 app.get('/', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
 app.get('/app', (_, res) => res.sendFile(isProd ? path.join(DIST, 'index.html') : path.join(ROOT, 'index.html')));
 app.get('/landing', (_, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
