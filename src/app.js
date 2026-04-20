@@ -682,6 +682,8 @@ class NexusBrain {
   }
 
   openLandingPreview(projectName) {
+    const project = this._pipelineProjects?.find(p => p.name === projectName);
+    if (project) { this.runProjectPreview(project.id); return; }
     const slug = String(projectName).toLowerCase().replace(/[^a-z0-9-_]/g, '-').replace(/-+/g, '-').slice(0, 50);
     const url = `${API}/workspace/${slug}/index.html`;
     const iframe = document.getElementById('preview-iframe');
